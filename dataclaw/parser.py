@@ -1,0 +1,292 @@
+"""Parse Claude Code session JSONL files into structured conversations."""
+
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .anonymizer import Anonymizer
+from .secrets import redact_text
+
+logger = logging.getLogger(__name__)
+
+CLAUDE_DIR = Path.home() / ".claude"
+PROJECTS_DIR = CLAUDE_DIR / "projects"
+
+
+def discover_projects() -> list[dict]:
+    """Discover all Claude Code projects with session counts."""
+    if not PROJECTS_DIR.exists():
+        return []
+
+    projects = []
+    for project_dir in sorted(PROJECTS_DIR.iterdir()):
+        if not project_dir.is_dir():
+            continue
+        sessions = list(project_dir.glob("*.jsonl"))
+        if not sessions:
+            continue
+        projects.append(
+            {
+                "dir_name": project_dir.name,
+                "display_name": _build_project_name(project_dir.name),
+                "session_count": len(sessions),
+                "total_size_bytes": sum(f.stat().st_size for f in sessions),
+            }
+        )
+    return projects
+
+
+def parse_project_sessions(
+    project_dir_name: str,
+    anonymizer: Anonymizer,
+    include_thinking: bool = True,
+) -> list[dict]:
+    """Parse all sessions for a project into structured dicts."""
+    project_path = PROJECTS_DIR / project_dir_name
+    if not project_path.exists():
+        return []
+
+    sessions = []
+    for session_file in sorted(project_path.glob("*.jsonl")):
+        parsed = _parse_session_file(session_file, anonymizer, include_thinking)
+        if parsed and parsed["messages"]:
+            parsed["project"] = _build_project_name(project_dir_name)
+            sessions.append(parsed)
+    return sessions
+
+
+def _parse_session_file(
+    filepath: Path, anonymizer: Anonymizer, include_thinking: bool = True
+) -> dict | None:
+    messages = []
+    metadata = {
+        "session_id": filepath.stem,
+        "cwd": None,
+        "git_branch": None,
+        "claude_version": None,
+        "model": None,
+        "start_time": None,
+        "end_time": None,
+    }
+    stats = {
+        "user_messages": 0,
+        "assistant_messages": 0,
+        "tool_uses": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+    }
+
+    skipped_lines = 0
+    try:
+        with open(filepath) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped_lines += 1
+                    continue
+                _process_entry(entry, messages, metadata, stats, anonymizer, include_thinking)
+    except OSError:
+        return None
+
+    if skipped_lines:
+        logger.debug("Skipped %d malformed lines in %s", skipped_lines, filepath.name)
+    stats["skipped_lines"] = skipped_lines
+
+    if not messages:
+        return None
+
+    return {
+        "session_id": metadata["session_id"],
+        "model": metadata["model"],
+        "git_branch": metadata["git_branch"],
+        "start_time": metadata["start_time"],
+        "end_time": metadata["end_time"],
+        "messages": messages,
+        "stats": stats,
+    }
+
+
+def _process_entry(
+    entry: dict[str, Any],
+    messages: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    stats: dict[str, int],
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+) -> None:
+    entry_type = entry.get("type")
+
+    if metadata["cwd"] is None and entry.get("cwd"):
+        metadata["cwd"] = anonymizer.path(entry["cwd"])
+        metadata["git_branch"] = entry.get("gitBranch")
+        metadata["claude_version"] = entry.get("version")
+        metadata["session_id"] = entry.get("sessionId", metadata["session_id"])
+
+    timestamp = _normalize_timestamp(entry.get("timestamp"))
+
+    if entry_type == "user":
+        content = _extract_user_content(entry, anonymizer)
+        if content is not None:
+            messages.append({"role": "user", "content": content, "timestamp": timestamp})
+            stats["user_messages"] += 1
+            if metadata["start_time"] is None:
+                metadata["start_time"] = timestamp
+            metadata["end_time"] = timestamp
+
+    elif entry_type == "assistant":
+        msg = _extract_assistant_content(entry, anonymizer, include_thinking)
+        if msg:
+            if metadata["model"] is None:
+                metadata["model"] = entry.get("message", {}).get("model")
+            usage = entry.get("message", {}).get("usage", {})
+            stats["input_tokens"] += usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+            stats["output_tokens"] += usage.get("output_tokens", 0)
+            stats["tool_uses"] += len(msg.get("tool_uses", []))
+            msg["timestamp"] = timestamp
+            messages.append(msg)
+            stats["assistant_messages"] += 1
+            metadata["end_time"] = timestamp
+
+
+def _extract_user_content(entry: dict[str, Any], anonymizer: Anonymizer) -> str | None:
+    msg_data = entry.get("message", {})
+    content = msg_data.get("content", "")
+    if isinstance(content, list):
+        text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+        content = "\n".join(text_parts)
+    if not content or not content.strip():
+        return None
+    return anonymizer.text(content)
+
+
+def _extract_assistant_content(
+    entry: dict[str, Any], anonymizer: Anonymizer, include_thinking: bool,
+) -> dict[str, Any] | None:
+    msg_data = entry.get("message", {})
+    content_blocks = msg_data.get("content", [])
+    if not isinstance(content_blocks, list):
+        return None
+
+    text_parts = []
+    thinking_parts = []
+    tool_uses = []
+
+    for block in content_blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            text = block.get("text", "").strip()
+            if text:
+                text_parts.append(anonymizer.text(text))
+        elif block_type == "thinking" and include_thinking:
+            thinking = block.get("thinking", "").strip()
+            if thinking:
+                thinking_parts.append(anonymizer.text(thinking))
+        elif block_type == "tool_use":
+            tool_uses.append({
+                "tool": block.get("name"),
+                "input": _summarize_tool_input(block.get("name"), block.get("input", {}), anonymizer),
+            })
+
+    if not text_parts and not tool_uses and not thinking_parts:
+        return None
+
+    msg = {"role": "assistant"}
+    if text_parts:
+        msg["content"] = "\n\n".join(text_parts)
+    if thinking_parts:
+        msg["thinking"] = "\n\n".join(thinking_parts)
+    if tool_uses:
+        msg["tool_uses"] = tool_uses
+    return msg
+
+
+MAX_TOOL_INPUT_LENGTH = 300
+
+
+def _redact_and_truncate(text: str, anonymizer: Anonymizer) -> str:
+    """Redact secrets BEFORE truncating to avoid partial secret leaks."""
+    text, _ = redact_text(text)
+    return anonymizer.text(text[:MAX_TOOL_INPUT_LENGTH])
+
+
+def _summarize_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonymizer) -> str:
+    """Summarize tool input for export."""
+    if not isinstance(input_data, dict):
+        return _redact_and_truncate(str(input_data), anonymizer)
+
+    name = tool_name.lower() if tool_name else ""
+
+    if name in ("read", "edit"):
+        return anonymizer.path(input_data.get("file_path", ""))
+    if name == "write":
+        path = anonymizer.path(input_data.get("file_path", ""))
+        return f"{path} ({len(input_data.get('content', ''))} chars)"
+    if name == "bash":
+        return _redact_and_truncate(input_data.get("command", ""), anonymizer)
+    if name == "grep":
+        pattern, _ = redact_text(input_data.get("pattern", ""))
+        return f"pattern={anonymizer.text(pattern)} path={anonymizer.path(input_data.get('path', ''))}"
+    if name == "glob":
+        return f"pattern={anonymizer.text(input_data.get('pattern', ''))} path={anonymizer.path(input_data.get('path', ''))}"
+    if name == "task":
+        return _redact_and_truncate(input_data.get("prompt", ""), anonymizer)
+    if name == "websearch":
+        return input_data.get("query", "")
+    if name == "webfetch":
+        return input_data.get("url", "")
+    return _redact_and_truncate(str(input_data), anonymizer)
+
+
+def _normalize_timestamp(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
+    return None
+
+
+def _build_project_name(dir_name: str) -> str:
+    """Convert a hyphen-encoded project dir name to a human-readable name.
+
+    Examples: '-Users-alice-Documents-myapp' -> 'myapp'
+              '-home-bob-project' -> 'project'
+              'standalone' -> 'standalone'
+    """
+    path = dir_name.replace("-", "/")
+    path = path.lstrip("/")
+    parts = path.split("/")
+    common_dirs = {"Documents", "Downloads", "Desktop"}
+
+    if len(parts) >= 2 and parts[0] == "Users":
+        if len(parts) >= 4 and parts[2] in common_dirs:
+            meaningful = parts[3:]
+        elif len(parts) >= 3 and parts[2] not in common_dirs:
+            meaningful = parts[2:]
+        else:
+            meaningful = []
+    elif len(parts) >= 2 and parts[0] == "home":
+        meaningful = parts[2:] if len(parts) > 2 else []
+    else:
+        meaningful = parts
+
+    if meaningful:
+        segments = dir_name.lstrip("-").split("-")
+        prefix_parts = len(parts) - len(meaningful)
+        return "-".join(segments[prefix_parts:]) or dir_name
+    else:
+        if len(parts) >= 2 and parts[0] in ("Users", "home"):
+            if len(parts) == 2:
+                return "~home"
+            if len(parts) == 3 and parts[2] in common_dirs:
+                return f"~{parts[2]}"
+        return dir_name.strip("-") or "unknown"
