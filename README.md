@@ -1,6 +1,8 @@
 # DataClaw
 
-Turn your Claude Code conversation history into structured training data and publish it to Hugging Face with a single command. DataClaw parses session logs, redacts secrets and PII, and uploads the result as a ready-to-use dataset — so the hours you spend coding with Claude can help make future models better.
+> **This is a performance art project.** Anthropic built their models on the world's freely shared information, then introduced increasingly [dystopian data policies](https://www.anthropic.com/news/detecting-and-preventing-distillation-attacks) to stop anyone else from doing the same — pulling up the ladder behind them. DataClaw lets you throw the ladder back down. The dataset it produces may or may not be useful for training, but the point is that it's yours to share.
+
+Turn your Claude Code and Codex conversation history into structured training data and publish it to Hugging Face with a single command. DataClaw parses session logs, redacts secrets and PII, and uploads the result as a ready-to-use dataset.
 
 ![DataClaw](dataclaw.jpeg)
 
@@ -8,10 +10,10 @@ Every export is tagged **`dataclaw`** on Hugging Face. Together, they may someda
 
 ## Give this to your agent
 
-Paste this into Claude Code (or any coding agent):
+Paste this into Claude Code, Codex, or any coding agent:
 
 ```
-Help me export my Claude Code conversation history to Hugging Face using DataClaw.
+Help me export my Claude Code and Codex conversation history to Hugging Face using DataClaw.
 Install it, set up the skill, then walk me through the process.
 
 STEP 1 — INSTALL
@@ -25,6 +27,27 @@ STEP 2 — INSTALL SKILL
 STEP 3 — START
   dataclaw prep
   Every dataclaw command outputs next_steps in its JSON — follow them through the entire flow.
+
+STEP 3A — PRESENT ALL FOLDERS (REQUIRED BEFORE EXPORT)
+  dataclaw list
+  Send the FULL project/folder list to the user in a message (name, source, sessions, size, excluded).
+  Ask which projects to exclude.
+  dataclaw config --exclude "project1,project2" OR dataclaw config --confirm-projects
+  Do not export until folder selection is explicitly confirmed.
+
+STEP 4 — REVIEW + CONFIRM (REQUIRED BEFORE PUSH)
+  dataclaw export --no-push --output /tmp/dataclaw_export.jsonl
+  Review PII findings and apply excludes/redactions as needed.
+  Full name is requested for an exact-name privacy scan against the export.
+  If the user declines sharing full name, use --skip-full-name-scan and attest the skip reason.
+  dataclaw confirm --full-name "THEIR FULL NAME" --attest-full-name "..." --attest-sensitive "..." --attest-manual-scan "..."
+
+STEP 5 — PUBLISH (ONLY AFTER EXPLICIT USER APPROVAL)
+  dataclaw export --publish-attestation "User explicitly approved publishing to Hugging Face."
+  Never publish unless the user explicitly says yes.
+
+IF ANY COMMAND FAILS DUE TO A SKIPPED STEP:
+  Restate the 5-step checklist above and resume from the blocked step (do not skip ahead).
 
 IMPORTANT: Never run bare `huggingface-cli login` — always use --token.
 IMPORTANT: Always export with --no-push first and review for PII before publishing.
@@ -41,9 +64,10 @@ huggingface-cli login --token YOUR_TOKEN
 
 # See your projects
 dataclaw prep
+dataclaw list  # Present full list and confirm folder scope before export
 
 # Configure
-dataclaw config --repo username/my-personal-claude-code-data
+dataclaw config --repo username/my-personal-codex-data
 dataclaw config --exclude "personal-stuff,scratch"
 dataclaw config --redact-usernames "my_github_handle,my_discord_name"
 dataclaw config --redact "my-domain.com,my-secret-project"
@@ -52,10 +76,21 @@ dataclaw config --redact "my-domain.com,my-secret-project"
 dataclaw export --no-push
 
 # Review and confirm
-dataclaw confirm
+dataclaw confirm \
+  --full-name "YOUR FULL NAME" \
+  --attest-full-name "Asked for full name and scanned export for YOUR FULL NAME." \
+  --attest-sensitive "Asked about company/client/internal names and private URLs; none found or redactions updated." \
+  --attest-manual-scan "Manually scanned 20 sessions across beginning/middle/end and reviewed findings."
+
+# Optional if user declines sharing full name
+dataclaw confirm \
+  --skip-full-name-scan \
+  --attest-full-name "User declined to share full name; skipped exact-name scan." \
+  --attest-sensitive "Asked about company/client/internal names and private URLs; none found or redactions updated." \
+  --attest-manual-scan "Manually scanned 20 sessions across beginning/middle/end and reviewed findings."
 
 # Push
-dataclaw export
+dataclaw export --publish-attestation "User explicitly approved publishing to Hugging Face."
 ```
 
 ### Commands
@@ -64,16 +99,22 @@ dataclaw export
 |---------|-------------|
 | `dataclaw status` | Show current stage and next steps (JSON) |
 | `dataclaw prep` | Discover projects, check HF auth, output JSON |
+| `dataclaw prep --source codex` | Prep using only Codex sessions |
+| `dataclaw prep --source claude` | Prep using only Claude Code sessions |
 | `dataclaw list` | List all projects with exclusion status |
+| `dataclaw list --source codex` | List only Codex projects |
 | `dataclaw config` | Show current config |
-| `dataclaw config --repo user/my-personal-claude-code-data` | Set HF repo |
+| `dataclaw config --repo user/my-personal-codex-data` | Set HF repo |
 | `dataclaw config --exclude "a,b"` | Add excluded projects (appends) |
 | `dataclaw config --redact "str1,str2"` | Add strings to always redact (appends) |
 | `dataclaw config --redact-usernames "u1,u2"` | Add usernames to anonymize (appends) |
 | `dataclaw config --confirm-projects` | Mark project selection as confirmed |
 | `dataclaw export --no-push` | Export locally only (always do this first) |
-| `dataclaw confirm` | Scan for PII, summarize export, unlock pushing |
-| `dataclaw export` | Export and push (requires `dataclaw confirm` first) |
+| `dataclaw export --source codex --no-push` | Export only Codex sessions locally |
+| `dataclaw export --source claude --no-push` | Export only Claude Code sessions locally |
+| `dataclaw confirm --full-name "NAME" --attest-full-name "..." --attest-sensitive "..." --attest-manual-scan "..."` | Scan for PII, run exact-name privacy check, verify review attestations, unlock pushing |
+| `dataclaw confirm --skip-full-name-scan --attest-full-name "..." --attest-sensitive "..." --attest-manual-scan "..."` | Skip exact-name scan when user declines sharing full name (requires skip attestation) |
+| `dataclaw export --publish-attestation "..."` | Export and push (requires `dataclaw confirm` first) |
 | `dataclaw export --all-projects` | Include everything (ignore exclusions) |
 | `dataclaw export --no-thinking` | Exclude extended thinking blocks |
 | `dataclaw update-skill claude` | Install/update the dataclaw skill for Claude Code |
@@ -89,7 +130,7 @@ dataclaw export
 | Assistant responses | Yes | Full text output |
 | Extended thinking | Yes | Claude's reasoning (opt out with `--no-thinking`) |
 | Tool calls | Yes | Tool name + summarized input |
-| Tool results | No | Not stored in Claude Code's logs |
+| Tool results | No | Not stored in session logs |
 | Token usage | Yes | Input/output tokens per session |
 | Model & metadata | Yes | Model name, git branch, timestamps |
 
@@ -150,18 +191,18 @@ Each HF repo also includes a `metadata.json` with aggregate stats.
 <details>
 <summary><b>Finding datasets on Hugging Face</b></summary>
 
-All repos are named `{username}/my-personal-claude-code-data` and tagged `dataclaw`.
+All repos are named `{username}/my-personal-codex-data` and tagged `dataclaw`.
 
 - **Browse all:** [huggingface.co/datasets?other=dataclaw](https://huggingface.co/datasets?other=dataclaw)
 - **Load one:**
   ```python
   from datasets import load_dataset
-  ds = load_dataset("alice/my-personal-claude-code-data", split="train")
+  ds = load_dataset("alice/my-personal-codex-data", split="train")
   ```
 - **Combine several:**
   ```python
   from datasets import load_dataset, concatenate_datasets
-  repos = ["alice/my-personal-claude-code-data", "bob/my-personal-claude-code-data"]
+  repos = ["alice/my-personal-codex-data", "bob/my-personal-codex-data"]
   ds = concatenate_datasets([load_dataset(r, split="train") for r in repos])
   ```
 
