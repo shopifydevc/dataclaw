@@ -1133,12 +1133,20 @@ def _extract_opencode_assistant_content(
             tool_name = part.get("tool")
             state = part.get("state", {})
             tool_input = state.get("input", {}) if isinstance(state, dict) else {}
-            tool_uses.append(
-                {
-                    "tool": tool_name,
-                    "input": _parse_tool_input(tool_name, tool_input, anonymizer),
-                }
-            )
+            tu: dict[str, Any] = {
+                "tool": tool_name,
+                "input": _parse_tool_input(tool_name, tool_input, anonymizer),
+            }
+            if isinstance(state, dict):
+                status = state.get("status")
+                if isinstance(status, str):
+                    tu["status"] = "success" if status == "completed" else status
+                output = state.get("output")
+                if isinstance(output, str) and output:
+                    tu["output"] = {"text": anonymizer.text(output)}
+                elif output is not None:
+                    tu["output"] = {}
+            tool_uses.append(tu)
 
     if not text_parts and not thinking_parts and not tool_uses:
         return None
@@ -1360,6 +1368,10 @@ def _parse_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonym
         return {"query": input_data.get("query", "")}
     if name == "webfetch":
         return {"url": input_data.get("url", "")}
+    if name == "apply_patch":
+        return {"patch": anonymizer.text(input_data.get("patchText", ""))}
+    if name == "codesearch":
+        return {"query": input_data.get("query", "")}
 
     # Codex tools
     if name == "exec_command":
