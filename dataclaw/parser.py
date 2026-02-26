@@ -585,7 +585,7 @@ def _parse_gemini_tool_call(tc: dict, anonymizer: Anonymizer) -> dict:
     elif name == "list_directory":
         inp = {"dir_path": anonymizer.path(args.get("dir_path", ""))}
         if args.get("ignore"):
-            inp["ignore"] = args["ignore"]
+            inp["ignore"] = [anonymizer.text(str(p)) for p in args["ignore"]] if isinstance(args["ignore"], list) else anonymizer.text(str(args["ignore"]))
     elif name == "glob":
         inp = {"pattern": args.get("pattern", "")}
     elif name in ("google_web_search", "web_fetch", "codebase_investigator"):
@@ -642,6 +642,10 @@ def _parse_gemini_tool_call(tc: dict, anonymizer: Anonymizer) -> dict:
                 parsed["exit_code"] = int(parsed["exit_code"])
             except ValueError:
                 pass
+        if "command" in parsed:
+            parsed["command"] = anonymizer.text(parsed["command"])
+        if "directory" in parsed:
+            parsed["directory"] = anonymizer.path(parsed["directory"])
         if "output" in parsed:
             parsed["output"] = anonymizer.text(parsed["output"])
         out = parsed
@@ -1365,13 +1369,13 @@ def _parse_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonym
     if name == "task":
         return {"prompt": anonymizer.text(input_data.get("prompt", ""))}
     if name == "websearch":
-        return {"query": input_data.get("query", "")}
+        return {"query": anonymizer.text(input_data.get("query", ""))}
     if name == "webfetch":
-        return {"url": input_data.get("url", "")}
+        return {"url": anonymizer.text(input_data.get("url", ""))}
     if name == "apply_patch":
         return {"patch": anonymizer.text(input_data.get("patchText", ""))}
     if name == "codesearch":
-        return {"query": input_data.get("query", "")}
+        return {"query": anonymizer.text(input_data.get("query", ""))}
 
     # Codex tools
     if name == "exec_command":
@@ -1391,9 +1395,10 @@ def _parse_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonym
             "max_output_tokens": input_data.get("max_output_tokens"),
         }
     if name == "update_plan":
+        plan = input_data.get("plan", [])
         return {
             "explanation": anonymizer.text(input_data.get("explanation", "")),
-            "plan": input_data.get("plan", []),
+            "plan": [anonymizer.text(str(p)) if isinstance(p, str) else p for p in plan],
         }
 
     # Fallback: anonymize all string values
