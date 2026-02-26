@@ -437,6 +437,7 @@ class TestDiscoverProjects:
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
 
     def _write_opencode_db(self, db_path):
@@ -988,6 +989,7 @@ class TestDiscoverSubagentProjects:
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
 
     def test_discover_includes_subagent_sessions(self, tmp_path, monkeypatch, mock_anonymizer):
@@ -1587,6 +1589,7 @@ class TestDiscoverOpenclawProjects:
         monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
 
     def test_discover_openclaw_projects(self, tmp_path, monkeypatch, mock_anonymizer):
@@ -1673,6 +1676,7 @@ class TestDiscoverCustomProjects:
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
 
     def _make_valid_session(self, session_id="s1", model="gpt-4", content="hello"):
         return json.dumps({
