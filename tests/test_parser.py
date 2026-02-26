@@ -20,6 +20,7 @@ from dataclaw.parser import (
     discover_projects,
     parse_project_sessions,
     _parse_codex_session_file,
+    _parse_openclaw_session_file,
 )
 
 
@@ -434,6 +435,8 @@ class TestDiscoverProjects:
         monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
         monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
+        monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
 
     def _write_opencode_db(self, db_path):
         conn = sqlite3.connect(db_path)
@@ -982,6 +985,8 @@ class TestDiscoverSubagentProjects:
         monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
         monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
+        monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
 
     def test_discover_includes_subagent_sessions(self, tmp_path, monkeypatch, mock_anonymizer):
         self._disable_codex(tmp_path, monkeypatch)
@@ -1324,3 +1329,331 @@ class TestBuildCodexToolResultMap:
         assert tu["status"] == "success"
         assert tu["output"]["exit_code"] == 0
         assert "foo.py" in tu["output"]["output"]
+
+
+# --- OpenClaw session parsing ---
+
+
+def _make_openclaw_session_header(session_id="oc-sess-1", cwd="/Users/alice/projects/myapp"):
+    return {
+        "type": "session",
+        "id": session_id,
+        "cwd": cwd,
+        "timestamp": "2026-02-20T10:00:00.000Z",
+    }
+
+
+def _make_openclaw_user_message(text, timestamp="2026-02-20T10:01:00.000Z"):
+    return {
+        "type": "message",
+        "timestamp": timestamp,
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        },
+    }
+
+
+def _make_openclaw_assistant_message(
+    text, timestamp="2026-02-20T10:02:00.000Z", model="claude-sonnet-4-20250514",
+    thinking=None, tool_calls=None, usage=None,
+):
+    content = []
+    if thinking:
+        content.append({"type": "thinking", "thinking": thinking})
+    if text:
+        content.append({"type": "text", "text": text})
+    for tc in (tool_calls or []):
+        content.append(tc)
+    msg = {
+        "type": "message",
+        "timestamp": timestamp,
+        "message": {
+            "role": "assistant",
+            "model": model,
+            "content": content,
+        },
+    }
+    if usage:
+        msg["message"]["usage"] = usage
+    return msg
+
+
+def _make_openclaw_tool_result(tool_call_id, output_text, is_error=False):
+    return {
+        "type": "message",
+        "timestamp": "2026-02-20T10:02:30.000Z",
+        "message": {
+            "role": "toolResult",
+            "toolCallId": tool_call_id,
+            "content": [{"type": "text", "text": output_text}],
+            "isError": is_error,
+        },
+    }
+
+
+class TestParseOpenclawSessionFile:
+    def test_basic_conversation(self, mock_anonymizer):
+        """Parse a simple user/assistant conversation."""
+        import tempfile
+        from pathlib import Path
+
+        lines = [
+            _make_openclaw_session_header(),
+            _make_openclaw_user_message("Hello"),
+            _make_openclaw_assistant_message("Hi there!", usage={"input": 50, "output": 20}),
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+            fpath = Path(f.name)
+
+        result = _parse_openclaw_session_file(fpath, mock_anonymizer)
+        assert result is not None
+        assert result["session_id"] == "oc-sess-1"
+        assert len(result["messages"]) == 2
+        assert result["messages"][0]["role"] == "user"
+        assert result["messages"][0]["content"] == "Hello"
+        assert result["messages"][1]["role"] == "assistant"
+        assert result["messages"][1]["content"] == "Hi there!"
+        assert result["stats"]["user_messages"] == 1
+        assert result["stats"]["assistant_messages"] == 1
+        assert result["stats"]["input_tokens"] == 50
+        assert result["stats"]["output_tokens"] == 20
+        fpath.unlink()
+
+    def test_thinking_included(self, mock_anonymizer):
+        """Thinking blocks should be included when include_thinking=True."""
+        import tempfile
+        from pathlib import Path
+
+        lines = [
+            _make_openclaw_session_header(),
+            _make_openclaw_user_message("Explain X"),
+            _make_openclaw_assistant_message("Here's the answer", thinking="Let me think about X..."),
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+            fpath = Path(f.name)
+
+        result = _parse_openclaw_session_file(fpath, mock_anonymizer, include_thinking=True)
+        assistant_msg = result["messages"][1]
+        assert "thinking" in assistant_msg
+        assert "Let me think about X" in assistant_msg["thinking"]
+
+        result_no_think = _parse_openclaw_session_file(fpath, mock_anonymizer, include_thinking=False)
+        assistant_msg_no_think = result_no_think["messages"][1]
+        assert "thinking" not in assistant_msg_no_think
+        fpath.unlink()
+
+    def test_tool_calls_with_results(self, mock_anonymizer):
+        """Tool calls should be paired with their results."""
+        import tempfile
+        from pathlib import Path
+
+        tool_call = {
+            "type": "toolCall",
+            "id": "tc-1",
+            "name": "read_file",
+            "arguments": {"path": "/tmp/test.py"},
+        }
+        lines = [
+            _make_openclaw_session_header(),
+            _make_openclaw_user_message("Read the file"),
+            _make_openclaw_assistant_message("Let me read that", tool_calls=[tool_call]),
+            _make_openclaw_tool_result("tc-1", "print('hello')"),
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+            fpath = Path(f.name)
+
+        result = _parse_openclaw_session_file(fpath, mock_anonymizer)
+        assistant_msg = result["messages"][1]
+        assert len(assistant_msg["tool_uses"]) == 1
+        tu = assistant_msg["tool_uses"][0]
+        assert tu["tool"] == "read_file"
+        assert tu["status"] == "success"
+        assert "hello" in tu["output"]["text"]
+        assert result["stats"]["tool_uses"] == 1
+        fpath.unlink()
+
+    def test_error_tool_result(self, mock_anonymizer):
+        """Tool results with isError=True should have status 'error'."""
+        import tempfile
+        from pathlib import Path
+
+        tool_call = {
+            "type": "toolCall",
+            "id": "tc-err",
+            "name": "bash",
+            "arguments": {"command": "rm /nope"},
+        }
+        lines = [
+            _make_openclaw_session_header(),
+            _make_openclaw_user_message("Delete it"),
+            _make_openclaw_assistant_message("Trying", tool_calls=[tool_call]),
+            _make_openclaw_tool_result("tc-err", "Permission denied", is_error=True),
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+            fpath = Path(f.name)
+
+        result = _parse_openclaw_session_file(fpath, mock_anonymizer)
+        tu = result["messages"][1]["tool_uses"][0]
+        assert tu["status"] == "error"
+        fpath.unlink()
+
+    def test_empty_file_returns_none(self, mock_anonymizer):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            fpath = Path(f.name)
+
+        result = _parse_openclaw_session_file(fpath, mock_anonymizer)
+        assert result is None
+        fpath.unlink()
+
+    def test_no_session_header_returns_none(self, mock_anonymizer):
+        import tempfile
+        from pathlib import Path
+
+        lines = [_make_openclaw_user_message("Hello")]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+            fpath = Path(f.name)
+
+        result = _parse_openclaw_session_file(fpath, mock_anonymizer)
+        assert result is None
+        fpath.unlink()
+
+    def test_model_change_entry(self, mock_anonymizer):
+        """model_change entries should update the session model."""
+        import tempfile
+        from pathlib import Path
+
+        lines = [
+            _make_openclaw_session_header(),
+            {"type": "model_change", "timestamp": "2026-02-20T10:00:30.000Z",
+             "provider": "anthropic", "modelId": "claude-opus-4-20250514"},
+            _make_openclaw_user_message("Hello"),
+            _make_openclaw_assistant_message("Hi", model=None),
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+            fpath = Path(f.name)
+
+        result = _parse_openclaw_session_file(fpath, mock_anonymizer)
+        assert result["model"] == "anthropic/claude-opus-4-20250514"
+        fpath.unlink()
+
+    def test_cache_read_tokens(self, mock_anonymizer):
+        """cacheRead should be added to input_tokens."""
+        import tempfile
+        from pathlib import Path
+
+        lines = [
+            _make_openclaw_session_header(),
+            _make_openclaw_user_message("Do something"),
+            _make_openclaw_assistant_message(
+                "Done", usage={"input": 100, "output": 50, "cacheRead": 200}
+            ),
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+            fpath = Path(f.name)
+
+        result = _parse_openclaw_session_file(fpath, mock_anonymizer)
+        assert result["stats"]["input_tokens"] == 300  # 100 + 200
+        assert result["stats"]["output_tokens"] == 50
+        fpath.unlink()
+
+
+class TestDiscoverOpenclawProjects:
+    def _disable_others(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", tmp_path / "no-claude")
+        monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex-sessions")
+        monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
+        monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
+        monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
+        monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
+
+    def test_discover_openclaw_projects(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+
+        agents_dir = tmp_path / "openclaw-agents"
+        sessions_dir = agents_dir / "agent-abc" / "sessions"
+        sessions_dir.mkdir(parents=True)
+
+        # Write two sessions for the same cwd
+        for i, sid in enumerate(["sess-1", "sess-2"]):
+            lines = [
+                _make_openclaw_session_header(session_id=sid, cwd="/Users/alice/projects/myapp"),
+                _make_openclaw_user_message(f"Message {i}"),
+                _make_openclaw_assistant_message(f"Reply {i}"),
+            ]
+            (sessions_dir / f"{sid}.jsonl").write_text(
+                "\n".join(json.dumps(l) for l in lines) + "\n"
+            )
+
+        monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", agents_dir)
+        projects = discover_projects()
+        assert len(projects) == 1
+        assert projects[0]["source"] == "openclaw"
+        assert projects[0]["session_count"] == 2
+        assert projects[0]["display_name"] == "openclaw:myapp"
+
+    def test_parse_openclaw_project_sessions(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+
+        agents_dir = tmp_path / "openclaw-agents"
+        sessions_dir = agents_dir / "agent-abc" / "sessions"
+        sessions_dir.mkdir(parents=True)
+
+        lines = [
+            _make_openclaw_session_header(session_id="sess-1", cwd="/Users/alice/projects/myapp"),
+            _make_openclaw_user_message("Hello"),
+            _make_openclaw_assistant_message("Hi!", usage={"input": 10, "output": 5}),
+        ]
+        (sessions_dir / "sess-1.jsonl").write_text(
+            "\n".join(json.dumps(l) for l in lines) + "\n"
+        )
+
+        monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", agents_dir)
+        sessions = parse_project_sessions(
+            "/Users/alice/projects/myapp", mock_anonymizer, source="openclaw"
+        )
+        assert len(sessions) == 1
+        assert sessions[0]["source"] == "openclaw"
+        assert sessions[0]["project"] == "openclaw:myapp"
+        assert sessions[0]["messages"][0]["content"] == "Hello"
+
+    def test_multiple_agents_same_cwd(self, tmp_path, monkeypatch, mock_anonymizer):
+        """Sessions from different agents but same cwd should be grouped."""
+        self._disable_others(tmp_path, monkeypatch)
+
+        agents_dir = tmp_path / "openclaw-agents"
+        for agent_name, sid in [("agent-1", "s1"), ("agent-2", "s2")]:
+            sessions_dir = agents_dir / agent_name / "sessions"
+            sessions_dir.mkdir(parents=True)
+            lines = [
+                _make_openclaw_session_header(session_id=sid, cwd="/Users/alice/projects/myapp"),
+                _make_openclaw_user_message(f"From {agent_name}"),
+                _make_openclaw_assistant_message(f"Reply from {agent_name}"),
+            ]
+            (sessions_dir / f"{sid}.jsonl").write_text(
+                "\n".join(json.dumps(l) for l in lines) + "\n"
+            )
+
+        monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", agents_dir)
+        projects = discover_projects()
+        assert len(projects) == 1
+        assert projects[0]["session_count"] == 2

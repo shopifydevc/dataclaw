@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dataclaw"
-version = "0.2.1"
-description = "Export your Claude Code and Codex conversations to Hugging Face as structured training data"
+version = "0.3.0"
+description = "Export your coding agent conversations to Hugging Face as structured data"
 requires-python = ">=3.10"
 license = "MIT"
 readme = "README.md"
 authors = [
     {name = "Banodoco"},
 ]
-keywords = ["claude-code", "huggingface", "dataset", "conversations", "training-data"]
+keywords = ["claude-code", "codex", "gemini-cli", "opencode", "openclaw", "huggingface", "dataset", "conversations"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

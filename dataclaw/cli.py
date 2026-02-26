@@ -1,4 +1,4 @@
-"""CLI for DataClaw — export Claude Code and Codex conversations to Hugging Face."""
+"""CLI for DataClaw — export coding agent conversations to Hugging Face."""
 
 import argparse
 import json
@@ -12,7 +12,7 @@ from typing import Any, Mapping, cast
 
 from .anonymizer import Anonymizer
 from .config import CONFIG_FILE, DataClawConfig, load_config, save_config
-from .parser import CLAUDE_DIR, CODEX_DIR, GEMINI_DIR, OPENCODE_DIR, discover_projects, parse_project_sessions
+from .parser import CLAUDE_DIR, CODEX_DIR, GEMINI_DIR, OPENCODE_DIR, OPENCLAW_DIR, discover_projects, parse_project_sessions
 from .secrets import _has_mixed_char_types, _shannon_entropy, redact_session
 
 HF_TAG = "dataclaw"
@@ -58,8 +58,8 @@ SETUP_TO_PUBLISH_STEPS = [
     "Step 6/6: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
 ]
 
-EXPLICIT_SOURCE_CHOICES = {"claude", "codex", "gemini", "opencode", "all", "both"}
-SOURCE_CHOICES = ["auto", "claude", "codex", "gemini", "opencode", "all"]
+EXPLICIT_SOURCE_CHOICES = {"claude", "codex", "gemini", "opencode", "openclaw", "all", "both"}
+SOURCE_CHOICES = ["auto", "claude", "codex", "gemini", "opencode", "openclaw", "all"]
 
 
 def _mask_secret(s: str) -> str:
@@ -87,7 +87,9 @@ def _source_label(source_filter: str) -> str:
         return "Gemini CLI"
     if source_filter == "opencode":
         return "OpenCode"
-    return "Claude Code, Codex, Gemini CLI, or OpenCode"
+    if source_filter == "openclaw":
+        return "OpenClaw"
+    return "Claude Code, Codex, Gemini CLI, OpenCode, or OpenClaw"
 
 
 def _normalize_source_filter(source_filter: str) -> str:
@@ -108,7 +110,7 @@ def _resolve_source_choice(
 
     Returns:
       (source_choice, explicit) where source_choice is one of
-      "claude" | "codex" | "gemini" | "all" | "auto".
+      "claude" | "codex" | "gemini" | "opencode" | "openclaw" | "all" | "auto".
     """
     if _is_explicit_source_choice(requested_source):
         return requested_source, True
@@ -129,7 +131,9 @@ def _has_session_sources(source_filter: str = "auto") -> bool:
         return GEMINI_DIR.exists()
     if source_filter == "opencode":
         return OPENCODE_DIR.exists()
-    return CLAUDE_DIR.exists() or CODEX_DIR.exists() or GEMINI_DIR.exists() or OPENCODE_DIR.exists()
+    if source_filter == "openclaw":
+        return OPENCLAW_DIR.exists()
+    return CLAUDE_DIR.exists() or CODEX_DIR.exists() or GEMINI_DIR.exists() or OPENCODE_DIR.exists() or OPENCLAW_DIR.exists()
 
 
 def _filter_projects_by_source(projects: list[dict], source_filter: str) -> list[dict]:
@@ -469,6 +473,7 @@ tags:
   - codex-cli
   - gemini-cli
   - opencode
+  - openclaw
   - conversations
   - coding-assistant
   - tool-use
