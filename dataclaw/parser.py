@@ -414,6 +414,34 @@ def _make_session_result(
     }
 
 
+def _build_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
+    """Pre-pass: build a map of tool_use_id -> {output, status} from tool_result blocks."""
+    result: dict[str, dict] = {}
+    for entry in entries:
+        if entry.get("type") != "user":
+            continue
+        for block in entry.get("message", {}).get("content", []):
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tid = block.get("tool_use_id")
+            if not tid:
+                continue
+            is_error = bool(block.get("is_error"))
+            content = block.get("content", "")
+            if isinstance(content, list):
+                text = "\n\n".join(
+                    part.get("text", "") for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ).strip()
+            else:
+                text = str(content).strip() if content else ""
+            result[tid] = {
+                "output": {"text": anonymizer.text(text)} if text else {},
+                "status": "error" if is_error else "success",
+            }
+    return result
+
+
 def _parse_claude_session_file(
     filepath: Path, anonymizer: Anonymizer, include_thinking: bool = True
 ) -> dict | None:
@@ -430,10 +458,13 @@ def _parse_claude_session_file(
     stats = _make_stats()
 
     try:
-        for entry in _iter_jsonl(filepath):
-            _process_entry(entry, messages, metadata, stats, anonymizer, include_thinking)
+        entries = list(_iter_jsonl(filepath))
     except OSError:
         return None
+
+    tool_result_map = _build_tool_result_map(entries, anonymizer)
+    for entry in entries:
+        _process_entry(entry, messages, metadata, stats, anonymizer, include_thinking, tool_result_map)
 
     return _make_session_result(metadata, messages, stats)
 
@@ -501,8 +532,10 @@ def _parse_subagent_session(
     }
     stats = _make_stats()
 
-    for _ts, entry in timed_entries:
-        _process_entry(entry, messages, metadata, stats, anonymizer, include_thinking)
+    entries = [entry for _ts, entry in timed_entries]
+    tool_result_map = _build_tool_result_map(entries, anonymizer)
+    for entry in entries:
+        _process_entry(entry, messages, metadata, stats, anonymizer, include_thinking, tool_result_map)
 
     return _make_session_result(metadata, messages, stats)
 
@@ -1117,6 +1150,7 @@ def _process_entry(
     stats: dict[str, int],
     anonymizer: Anonymizer,
     include_thinking: bool,
+    tool_result_map: dict[str, dict] | None = None,
 ) -> None:
     entry_type = entry.get("type")
 
@@ -1136,7 +1170,7 @@ def _process_entry(
             _update_time_bounds(metadata, timestamp)
 
     elif entry_type == "assistant":
-        msg = _extract_assistant_content(entry, anonymizer, include_thinking)
+        msg = _extract_assistant_content(entry, anonymizer, include_thinking, tool_result_map)
         if msg:
             if metadata["model"] is None:
                 metadata["model"] = entry.get("message", {}).get("model")
@@ -1163,6 +1197,7 @@ def _extract_user_content(entry: dict[str, Any], anonymizer: Anonymizer) -> str 
 
 def _extract_assistant_content(
     entry: dict[str, Any], anonymizer: Anonymizer, include_thinking: bool,
+    tool_result_map: dict[str, dict] | None = None,
 ) -> dict[str, Any] | None:
     msg_data = entry.get("message", {})
     content_blocks = msg_data.get("content", [])
@@ -1186,10 +1221,16 @@ def _extract_assistant_content(
             if thinking:
                 thinking_parts.append(anonymizer.text(thinking))
         elif block_type == "tool_use":
-            tool_uses.append({
+            tu: dict[str, Any] = {
                 "tool": block.get("name"),
                 "input": _parse_tool_input(block.get("name"), block.get("input", {}), anonymizer),
-            })
+            }
+            if tool_result_map is not None:
+                result = tool_result_map.get(block.get("id", ""))
+                if result:
+                    tu["output"] = result["output"]
+                    tu["status"] = result["status"]
+            tool_uses.append(tu)
 
     if not text_parts and not tool_uses and not thinking_parts:
         return None
